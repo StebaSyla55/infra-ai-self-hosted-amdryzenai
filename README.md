@@ -114,3 +114,109 @@ commente ollama & ollama-init (CPU),
 renomme ollama-amd → ollama et ollama-init-amd → ollama-init.
 Ça force le chemin ROCm par défaut. 
 GitHub
+
+#Astuce 2 :
+
+Installer ROCm côté hôte (Ubuntu 22.04)
+
+Objectif : avoir le pilote amdgpu-dkms + l’espace utilisateur ROCm, puis vérifier que /dev/kfd et /dev/dri existent et sont accessibles. C’est la condition pour que le conteneur ollama:rocm voie le GPU. 
+rocm.docs.amd.com
+
+Ajouter le dépôt ROCm + clé (version du jour 6.4.3)
+
+# clé
+sudo mkdir -p /etc/apt/keyrings
+wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | gpg --dearmor | \
+  sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+
+# dépôt jammy
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.4.3 jammy main" | \
+  sudo tee /etc/apt/sources.list.d/rocm.list
+
+echo -e 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600' | \
+  sudo tee /etc/apt/preferences.d/rocm-pin-600
+
+sudo apt update
+
+
+Installer ROCm (inclut les paquets usuels + dépendances)
+
+sudo apt install -y rocm
+
+
+Le guide “Ubuntu native installation” recommande cette méthode via apt. 
+rocm.docs.amd.com
+
+(Optionnel mais utile) : config post-install (liens libs + PATH)
+
+echo -e "/opt/rocm/lib\n/opt/rocm/lib64" | sudo tee -a /etc/ld.so.conf.d/rocm.conf
+sudo ldconfig
+
+
+Étapes de “Post-installation instructions”. 
+rocm.docs.amd.com
+
+Donner les droits d’accès GPU aux utilisateurs Docker
+
+Méthode simple (groupes video et render) :
+
+sudo usermod -aG video,render $USER
+# (déconnexion/reconnexion ou reboot ensuite)
+
+
+Les docs ROCm proposent l’accès par groupes (video/render) ou via règles udev. 
+rocm.docs.amd.com
+
+Méthode udev (si tu préfères gérer globalement les droits) :
+
+# Accès pour tous (exemple)
+echo 'KERNEL=="kfd", MODE="0666"
+SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"' | \
+  sudo tee /etc/udev/rules.d/70-amdgpu.rules
+
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+
+Les règles udev ci-dessus ouvrent /dev/kfd et les render nodes à tous (ou adapte à un groupe dédié). 
+rocm.docs.amd.com
+
+Redémarrer l’hôte
+
+sudo reboot
+
+
+Vérifier les devices et l’accès
+
+# Doivent exister
+ls -l /dev/kfd /dev/dri
+
+# Outils de vérification (paquet rocminfo)
+sudo apt install -y rocminfo
+rocminfo   # affiche les agents s’ils sont supportés
+
+
+/dev/kfd est l’interface compute indispensable ; /dev/dri expose les GPU (render nodes). 
+rocm.docs.amd.com
+
+Secure Boot : si activé, tu devras signer amdgpu-dkms ou désactiver Secure Boot (sinon chargement du module bloqué). 
+rocm.docs.amd.com
+Vérifier que Ollama utilise HIP (GPU)
+
+Après le déploiement, regarde les logs côté Coolify (ou SSH) :
+
+docker compose logs -f ollama ollama-init
+
+
+Attendus :
+
+ollama-init tire tes modèles (ex. llama3.2:3b).
+
+ollama indique l’utilisation de HIP/ROCm ou mentionne un device GPU.
+
+Ensuite, un mini test d’inférence :
+
+docker exec -it ollama ollama run llama3.2:3b "Hello"
+
+
+Si ça répond vite et que les logs d’ollama montrent le GPU, c’est tout bon.
+GitHub
