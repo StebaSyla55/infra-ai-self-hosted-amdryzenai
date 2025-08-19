@@ -78,6 +78,18 @@ WAHA
 Ce compose reprend les services officiels Self-Hosting with Docker. Pour rester à jour, épinglez les tags d’images et suivez les release notes. 
 Supabase
 
+# astuces : 
+
+1) Supabase : générer JWT_SECRET, ANON_KEY, SERVICE_ROLE_KEY
+
+Méthode rapide (officielle, via le site)
+
+Ouvre la page “Self-Hosting with Docker” de Supabase.
+
+Descends à Generate API keys → saisis ton JWT_SECRET → clique pour générer anon et service keys, puis copie/colle dans ton .env. 
+Supabase
+
+
 #8) Améliorations possibles
 
 NPU Ryzen AI (Linux) : aujourd’hui, Ollama ne supporte pas le NPU (suivre l’issue publique). 
@@ -86,3 +98,19 @@ Accélération NPU possible via Ryzen AI Software + ONNX Runtime GenAI/Lemonade 
 GitHub
 ryzenai.docs.amd.com
 
+#9) Config Ollama
+
+Deux points : (A) activer le profil Compose gpu-amd, (B) vérifier l’accès GPU dans le conteneur.
+
+A) Activer le profil dans Coolify
+
+Option 1 — via profils Compose : dans la ressource Coolify, ajoute une variable d’environnement COMPOSE_PROFILES=gpu-amd, puis Redeploy. Docker Compose activera alors ollama-amd/ollama-init-amd au lieu de la variante CPU. 
+Docker Documentation
+
+Option 2 — si ta version de Coolify ignore les profils (bug connu en cours de résolution) : édite vite fait le compose dans Coolify →
+
+commente ollama & ollama-init (CPU),
+
+renomme ollama-amd → ollama et ollama-init-amd → ollama-init.
+Ça force le chemin ROCm par défaut. 
+GitHub
