@@ -4,6 +4,20 @@ ACEMAGIC AM08 Pro AMD Ryzen 7 8845HS Mini PC
 
 # Stack IA auto-hébergée prêt Coolify : **n8n queue-mode**, **Supabase Full**, **WAHA**, **Converter**, **Whisper**, **Ollama (CPU/AMD ROCm)**.
 
+## 0) Architecture dépot : 
+
+infra-ai-self-hosted-amdryzenai/
+├─ docker-compose.yml
+├─ .env.example  # A rentrer en Developer view dans Coolify.
+├─ README.md
+├─ converter/  # https://github.com/StebaSyla55/infra-n8n-converter
+│  ├─ Dockerfile
+│  └─ api.py            
+└─ whisper/  # https://github.com/StebaSyla55/whisper_project
+   ├─ Dockerfile
+   ├─ requirements.txt  
+   └─ transcribe_all.py 
+   
 ## 1) Pré-requis hôte
 ```bash
 # Dossiers de travail
