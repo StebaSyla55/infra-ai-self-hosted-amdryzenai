@@ -1,0 +1,555 @@
+version: "3.9"
+
+x-common-env: &common-env
+  GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Paris}
+
+services:
+  # ======================= SECRETS INIT (one-shot) =======================
+  secrets-init:
+    build: ./secrets
+    image: infra-ai-suite/secrets-init:latest
+    container_name: secrets-init
+    restart: "no"
+    environment:
+      COOLIFY_API_URL: ${COOLIFY_API_URL:-}
+      COOLIFY_API_TOKEN: ${COOLIFY_API_TOKEN:-}
+      COOLIFY_RESOURCE_UUID: ${COOLIFY_RESOURCE_UUID:-}
+      COOLIFY_RESOURCE_KIND: ${COOLIFY_RESOURCE_KIND:-service}
+      # le script lit toutes les autres vars pour détecter celles à générer
+    volumes:
+      - /srv/secrets:/secrets:rw  # <-- bind-mount clair (gocryptfs)
+    # pas de depends_on: il peut tourner en parallèle ; les services n'en dépendent pas strictement
+
+  # ======================= DATA LAYER (Supabase Postgres) =======================
+  db:
+    image: supabase/postgres:15.8.1.060
+    container_name: db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U supabase_admin -h localhost -p ${POSTGRES_PORT}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  db-init:
+    image: postgres:16-alpine
+    container_name: db-init
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    entrypoint: ["/bin/sh","-lc"]
+    command: >
+      "
+      psql -h db -U supabase_admin -d ${POSTGRES_DB} -p ${POSTGRES_PORT}
+      -c \"DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${N8N_DB_USER}') THEN
+          CREATE ROLE ${N8N_DB_USER} LOGIN PASSWORD '${N8N_DB_PASSWORD}';
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname='n8n') THEN
+          CREATE DATABASE n8n OWNER ${N8N_DB_USER};
+        END IF;
+      END$$;\"
+      "
+
+  # ======================= REDIS (queue n8n) =======================
+  redis-n8n:
+    image: redis:7-alpine
+    container_name: redis-n8n
+    command: ["redis-server","--requirepass","${REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD","redis-cli","-a","${REDIS_PASSWORD}","PING"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # ======================= n8n (API/EDITEUR) =======================
+  n8n-api:
+    image: n8nio/n8n:latest
+    container_name: n8n-api
+    depends_on:
+      db:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      redis-n8n:
+        condition: service_healthy
+      converter:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+        n8n import:credentials --separate --input ${N8N_IMPORT_EXPORT_DIR} || true &&
+        n8n import:workflow    --separate --input ${N8N_IMPORT_EXPORT_DIR} || true &&
+        n8n start
+      "
+    environment:
+      <<: *common-env
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis-n8n
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QUEUE_BULL_PREFIX: n8n
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS:-true}
+      QUEUE_HEALTH_CHECK_ACTIVE: ${QUEUE_HEALTH_CHECK_ACTIVE:-true}
+      CONVERTER_API_KEY: ${CONVERTER_API_KEY}
+      CONVERTER_URL: http://converter:8000
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      QUEUE_BULL_REDIS_URL=redis://:${REDIS_PASSWORD}@redis-n8n:6379
+      QUEUE_BULL_PREFIX=n8n
+      N8N_IMPORT_EXPORT_DIR=/backup
+      N8N_IMPORT_EXPORT_OVERWRITE=overwrite
+    volumes:
+      - /srv/n8n_backup:/backup:rw
+      - /srv/shared:/data/shared:rw,exec
+      - /srv/n8n_data:/home/node/.n8n:rw,exec
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL","wget -qO- http://127.0.0.1:5678/ || exit 1"]
+      interval: 10s
+      timeout: 20s
+      retries: 12
+
+  # ======================= n8n (WORKER) =======================
+  n8n-worker:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker
+    depends_on:
+      n8n-api:
+        condition: service_started
+      redis-n8n:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis-n8n
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QUEUE_BULL_PREFIX: n8n
+      QUEUE_BULL_REDIS_URL=redis://:${REDIS_PASSWORD}@redis-n8n:6379
+      QUEUE_BULL_PREFIX=n8n
+    command: ["n8n","worker"]
+    volumes:
+      - /srv/shared:/data/shared:rw,exec
+      - /srv/n8n_data:/home/node/.n8n:rw,exec
+    restart: unless-stopped
+
+  # ======================= Exports n8n & pg_dump =======================
+  n8n-exporter:
+    image: n8nio/n8n:latest
+    container_name: n8n-exporter
+    user: "node"
+    depends_on:
+      n8n-api:
+        condition: service_started
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Paris}
+    volumes:
+      - /srv/n8n_backup:/backup:rw,exec
+      - /srv/n8n_data:/home/node/.n8n:rw,exec
+    entrypoint: >
+      /bin/sh -c '
+        mkdir -p /backup/{workflows,credentials} &&
+        while true; do
+          n8n export:workflow    --backup --output /backup/workflows   &&
+          n8n export:credentials --backup --output /backup/credentials ;
+          sleep 300;
+        done
+      '
+    restart: unless-stopped
+
+  pg-backup:
+    image: postgres:16-alpine
+    container_name: pg-backup
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      DB_URI: postgresql://${N8N_DB_USER}:${N8N_DB_PASSWORD}@db:${POSTGRES_PORT}/n8n
+    volumes:
+      - /srv/n8n_backup/pgdump:/backup/pgdump:rw
+    entrypoint: >
+      /bin/sh -lc '
+        mkdir -p /backup/pgdump;
+        while true; do
+          pg_dump --dbname=${DB_URI} --file=/backup/pgdump/n8n-$(date +%F-%H%M).sql;
+          find /backup/pgdump -type f -mtime +14 -delete;
+          sleep 3600;
+        done
+      '
+    restart: unless-stopped
+
+  # ======================= WAHA =======================
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: waha
+    depends_on:
+      n8n-api:
+        condition: service_started
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD}
+      WAHA_BASE_URL: ${WAHA_PUBLIC_URL}
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WHATSAPP_HOOK_EVENTS: ${WAHA_HOOK_EVENTS}
+      WHATSAPP_HOOK_URL: http://n8n-api:5678${WAHA_HOOK_URL_PATH}
+    volumes:
+      - /srv/waha_data:/data
+    restart: unless-stopped
+
+  # ======================= Converter =======================
+  converter:
+    build: ./converter
+    image: converter:latest
+    container_name: converter
+    environment:
+      API_KEY: ${CONVERTER_API_KEY}
+    volumes:
+      - /srv/shared:/data/shared:rw,exec
+    restart: unless-stopped
+
+  # ======================= Whisper =======================
+  whisper:
+    build: ./whisper
+    container_name: whisper-transcriber
+    volumes:
+      - ${AUDIO_IN}:/app/input:rw
+      - ${AUDIO_OUT}:/app/output:rw
+    restart: unless-stopped
+
+  # ======================= Ollama (AMD ROCm PAR DÉFAUT) =======================
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: ollama
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:rocm
+    container_name: ollama-init
+    depends_on: [ollama]
+    environment:
+      OLLAMA_HOST: ollama:11434
+      OLLAMA_MODELS_TO_PULL: ${OLLAMA_MODELS_TO_PULL:-}
+    entrypoint: /bin/sh
+    command:
+      - -lc
+      - |
+        sleep 3
+        if [ -n "$${OLLAMA_MODELS_TO_PULL}" ]; then
+          for m in $(echo "$${OLLAMA_MODELS_TO_PULL}" | tr ',' ' '); do
+            echo "Pulling $$m"; ollama pull "$$m" || exit 1
+          done
+        else
+          echo "No models to pull at init."
+        fi
+        echo "Done."
+
+  # ======================= Supabase Gateway / Services =======================
+  kong:
+    image: kong:2.8.1
+    container_name: supabase-kong
+    depends_on:
+      analytics:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    volumes:
+      - ./supabase/volumes/api/kong.yml:/home/kong/temp.yml:ro
+    entrypoint: >
+      bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
+    restart: unless-stopped
+
+  auth:
+    image: supabase/gotrue:v2.177.0
+    container_name: supabase-auth
+    depends_on:
+      db:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${SITE_URL}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT}
+      GOTRUE_SMTP_USER: ${SMTP_USER}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAILER_URLPATHS_INVITE}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
+    restart: unless-stopped
+
+  rest:
+    image: postgrest/postgrest:v12.2.12
+    container_name: supabase-rest
+    depends_on:
+      db:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      PGRST_DB_SCHEMAS: public,storage,graphql_public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    command: ["postgrest"]
+    restart: unless-stopped
+
+  realtime:
+    image: supabase/realtime:v2.34.47
+    container_name: realtime-dev.supabase-realtime
+    depends_on:
+      db:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: ${POSTGRES_PORT}
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: true
+      RUN_JANITOR: true
+    restart: unless-stopped
+
+  storage:
+    image: supabase/storage-api:v1.25.7
+    container_name: supabase-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      imgproxy:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+    volumes:
+      - ./supabase/volumes/storage:/var/lib/storage:Z
+    restart: unless-stopped
+
+  imgproxy:
+    image: darthsim/imgproxy:v3.8.0
+    container_name: supabase-imgproxy
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+    volumes:
+      - ./supabase/volumes/storage:/var/lib/storage:Z
+    restart: unless-stopped
+
+  meta:
+    image: supabase/postgres-meta:v0.91.0
+    container_name: supabase-meta
+    depends_on:
+      db:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: ${POSTGRES_PORT}
+      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: unless-stopped
+
+  functions:
+    image: supabase/edge-runtime:v1.67.4
+    container_name: supabase-edge-functions
+    depends_on:
+      analytics:
+        condition: service_healthy
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      VERIFY_JWT: "true"
+    volumes:
+      - ./supabase/volumes/functions:/home/deno/functions:Z
+    command: ["start","--main-service","/home/deno/functions/main"]
+    restart: unless-stopped
+
+  analytics:
+    image: supabase/logflare:1.14.2
+    container_name: supabase-analytics
+    environment:
+      LOGFLARE_NODE_HOST: 127.0.0.1
+      DB_USERNAME: supabase_admin
+      DB_DATABASE: _supabase
+      DB_HOSTNAME: db
+      DB_PORT: ${POSTGRES_PORT}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: _analytics
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_SINGLE_TENANT: true
+      LOGFLARE_SUPABASE_MODE: true
+      POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/_supabase
+      POSTGRES_BACKEND_SCHEMA: _analytics
+      LOGFLARE_FEATURE_FLAG_OVERRIDE: multibackend=true
+    restart: unless-stopped
+
+  vector:
+    image: timberio/vector:0.28.1-alpine
+    container_name: supabase-vector
+    environment:
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+    volumes:
+      - ./supabase/volumes/logs/vector.yml:/etc/vector/vector.yml:ro,Z
+      - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,Z
+    command: ["--config","/etc/vector/vector.yml"]
+    security_opt:
+      - "label=disable"
+    restart: unless-stopped
+
+  supavisor:
+    image: supabase/supavisor:2.5.7
+    container_name: supabase-pooler
+    depends_on:
+      db:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/_supabase
+      CLUSTER_POSTGRES: true
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      REGION: local
+      ERL_AFLAGS: -proto_dist inet_tcp
+      POOLER_TENANT_ID: ${POOLER_TENANT_ID}
+      POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
+      POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
+      POOLER_POOL_MODE: transaction
+      DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE}
+    command: ["/bin/sh","-c","/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
+    volumes:
+      - ./supabase/volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,Z
+    restart: unless-stopped
+
+  studio:
+    image: supabase/studio:2025.06.30-sha-6f5982d
+    container_name: supabase-studio
+    depends_on:
+      analytics:
+        condition: service_healthy
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_URL: http://analytics:4000
+      NEXT_PUBLIC_ENABLE_LOGS: true
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  redis_data:
+  ollama_data:
