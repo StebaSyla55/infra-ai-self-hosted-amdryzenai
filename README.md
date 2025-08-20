@@ -7,10 +7,10 @@ ACEMAGIC AM08 Pro AMD Ryzen 7 8845HS Mini PC
 ## 0) Architecture dépot : 
 
 infra-ai-self-hosted-amdryzenai/
-├─ docker-compose.yml
-├─ .env.example  # A rentrer en Developer view dans Coolify.
-├─ README.md
-├─ converter/  # https://github.com/StebaSyla55/infra-n8n-converter
+├ docker-compose.yml
+├.env.example  # A rentrer en Developer view dans Coolify.
+├README.md
+├converter/  # https://github.com/StebaSyla55/infra-n8n-converter
 │  ├─ Dockerfile
 │  └─ api.py            
 └─ whisper/  # https://github.com/StebaSyla55/whisper_project
