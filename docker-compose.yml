@@ -19,7 +19,24 @@ services:
     volumes:
       - /srv/secrets:/secrets:rw  # <-- bind-mount clair (gocryptfs)
     # pas de depends_on: il peut tourner en parallèle ; les services n'en dépendent pas strictement
-
+  supabase-bootstrap:
+    image: curlimages/curl:8.10.1
+    container_name: supabase-bootstrap
+    entrypoint: ["/bin/sh","-lc"]
+    command: |
+      set -e
+      mkdir -p /mnt/{api,logs,pooler,functions,storage} /mnt/functions/main
+      [ -f /mnt/api/kong.yml ] || curl -fsSL -o /mnt/api/kong.yml \
+        https://raw.githubusercontent.com/supabase/supabase/master/docker/volumes/api/kong.yml
+      [ -f /mnt/logs/vector.yml ] || curl -fsSL -o /mnt/logs/vector.yml \
+        https://raw.githubusercontent.com/supabase/supabase/master/docker/volumes/logs/vector.yml
+      [ -f /mnt/pooler/pooler.exs ] || curl -fsSL -o /mnt/pooler/pooler.exs \
+        https://raw.githubusercontent.com/supabase/supabase/master/docker/volumes/pooler/pooler.exs
+      chown -R 1000:1000 /mnt || true
+      echo "Supabase volumes bootstrap OK."
+    volumes:
+      - /srv/supabase:/mnt
+    restart: "no"
   # ======================= DATA LAYER (Supabase Postgres) =======================
   db:
     image: supabase/postgres:15.8.1.060
@@ -253,38 +270,50 @@ services:
       - ${AUDIO_OUT}:/app/output:rw
     restart: unless-stopped
 
-  # ======================= Ollama (AMD ROCm PAR DÉFAUT) =======================
-  ollama:
+  # ======================= Ollama (AMD gpu (rocm)/cpu) =======================
+ # ---------- GPU (ROCm) ----------
+  ollama-gpu:
     image: ollama/ollama:rocm
-    container_name: ollama
+    container_name: ollama-gpu
     devices:
       - "/dev/kfd"
       - "/dev/dri"
+    environment:
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
     volumes:
-      - ollama_data:/root/.ollama
+      - ollama_data_gpu:/root/.ollama
+    ports:
+      - "11434:11434"
     restart: unless-stopped
 
-  ollama-init:
+  ollama-gpu-init:
     image: ollama/ollama:rocm
-    container_name: ollama-init
-    depends_on: [ollama]
+    container_name: ollama-gpu-init
+    depends_on: [ollama-gpu]
     environment:
-      OLLAMA_HOST: ollama:11434
-      OLLAMA_MODELS_TO_PULL: ${OLLAMA_MODELS_TO_PULL:-}
-    entrypoint: /bin/sh
-    command:
-      - -lc
-      - |
-        sleep 3
-        if [ -n "$${OLLAMA_MODELS_TO_PULL}" ]; then
-          for m in $(echo "$${OLLAMA_MODELS_TO_PULL}" | tr ',' ' '); do
-            echo "Pulling $$m"; ollama pull "$$m" || exit 1
-          done
-        else
-          echo "No models to pull at init."
-        fi
-        echo "Done."
+      OLLAMA_HOST: ollama-gpu:11434
+      OLLAMA_MODELS_TO_PULL: "Qwen2.5:7b-instruct,mxbai-embed-large"
+    entrypoint: ["/bin/sh","-lc","sleep 3; for m in $(echo $${OLLAMA_MODELS_TO_PULL}|tr ',' ' '); do echo pulling $$m; ollama pull $$m || exit 1; done; echo done."]
 
+  # ---------- CPU ----------
+  ollama-cpu:
+    image: ollama/ollama:latest
+    container_name: ollama-cpu
+    volumes:
+      - ollama_data_cpu:/root/.ollama
+    ports:
+      - "11435:11434"
+    restart: unless-stopped
+
+  ollama-cpu-init:
+    image: ollama/ollama:latest
+    container_name: ollama-cpu-init
+    depends_on: [ollama-cpu]
+    environment:
+      OLLAMA_HOST: ollama-cpu:11434
+      OLLAMA_MODELS_TO_PULL: "gpt-oss:20b,mixtral:8x7b-instruct-v0.1"
+    entrypoint: ["/bin/sh","-lc","sleep 3; for m in $(echo $${OLLAMA_MODELS_TO_PULL}|tr ',' ' '); do echo pulling $$m; ollama pull $$m || exit 1; done; echo done."]
   # ======================= Supabase Gateway / Services =======================
   kong:
     image: kong:2.8.1
@@ -292,6 +321,8 @@ services:
     depends_on:
       analytics:
         condition: service_healthy
+      supabase-bootstrap:
+        condition: service_completed_successfully
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
@@ -300,7 +331,7 @@ services:
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
     volumes:
-      - ./supabase/volumes/api/kong.yml:/home/kong/temp.yml:ro
+      - /srv/supabase/api/kong.yml:/home/kong/temp.yml:ro
     entrypoint: >
       bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
     restart: unless-stopped
@@ -413,7 +444,7 @@ services:
       ENABLE_IMAGE_TRANSFORMATION: "true"
       IMGPROXY_URL: http://imgproxy:5001
     volumes:
-      - ./supabase/volumes/storage:/var/lib/storage:Z
+      - /srv/supabase/storage:/var/lib/storage:Z
     restart: unless-stopped
 
   imgproxy:
@@ -459,7 +490,7 @@ services:
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
       VERIFY_JWT: "true"
     volumes:
-      - ./supabase/volumes/functions:/home/deno/functions:Z
+      - /srv/supabase/functions:/home/deno/functions:Z
     command: ["start","--main-service","/home/deno/functions/main"]
     restart: unless-stopped
 
@@ -489,7 +520,7 @@ services:
     environment:
       LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
     volumes:
-      - ./supabase/volumes/logs/vector.yml:/etc/vector/vector.yml:ro,Z
+      - /srv/supabase/logs/vector.yml:/etc/vector/vector.yml:ro,Z
       - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,Z
     command: ["--config","/etc/vector/vector.yml"]
     security_opt:
@@ -524,7 +555,7 @@ services:
       DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE}
     command: ["/bin/sh","-c","/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
     volumes:
-      - ./supabase/volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,Z
+      - /srv/supabase/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,Z
     restart: unless-stopped
 
   studio:
@@ -552,4 +583,5 @@ services:
 volumes:
   db_data:
   redis_data:
-  ollama_data:
+  ollama_data_gpu:
+  ollama_data_cpu:
