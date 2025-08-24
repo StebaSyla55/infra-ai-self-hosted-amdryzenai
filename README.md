@@ -18,13 +18,13 @@ Sécurité & secrets intégrés (init auto + option de chiffrement au repos), **
 8. [Notes Supabase](#7-notes-supabase)  
 9. [Sécurisation supplémentaire (secrets au repos)](#8-sécurisation-supplémentaire-secrets-au-repos)  
 10. [Dépannage](#9-dépannage)  
-11. [Annexes : `.env.example` & `.env` (exemple rempli)](#10-annexes-envexample--env-exemple-rempli)
+11. [Annexes : `.env.example` ](#10-annexes-envexample--env-exemple-rempli)
 
 ---
 
 ## Arborescence
 ```
-infra-ai-suite/
+infra-ai-self-hosted-amdryzenai/
 ├─ docker-compose.yml
 ├─ .env.example
 ├─ README.md
@@ -334,4 +334,5 @@ COOLIFY_RESOURCE_KIND=service
 
 
 **Prêt !** Déployez. Au 1er run, `secrets-init` génère les clés manquantes, les écrit (et peut les pousser dans l’UI de **domaine.com#2** si `COOLIFY_*` sont renseignées), puis la stack redémarre et part en production.
+
 
