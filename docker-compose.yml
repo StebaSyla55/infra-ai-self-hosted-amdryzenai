@@ -43,11 +43,11 @@ services:
     container_name: db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U supabase_admin -h localhost -p ${POSTGRES_PORT}"]
+      test: ["CMD-SHELL","pg_isready -U supabase_admin -h localhost -p ${POSTGRES_PORT:-5432}"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -62,29 +62,27 @@ services:
         condition: service_healthy
     restart: "no"
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-}
     entrypoint: ["/bin/sh","-lc"]
-    command: >
-      "
-      psql -h db -U supabase_admin -d ${POSTGRES_DB} -p ${POSTGRES_PORT}
-      -c \"DO $$
+    command: |
+      psql -h db -U supabase_admin -d ${POSTGRES_DB:-postgres} -p ${POSTGRES_PORT:-5432} \
+        -c "DO $$
       BEGIN
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${N8N_DB_USER}') THEN
-          CREATE ROLE ${N8N_DB_USER} LOGIN PASSWORD '${N8N_DB_PASSWORD}';
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${N8N_DB_USER:-n8n}') THEN
+          CREATE ROLE ${N8N_DB_USER:-n8n} LOGIN PASSWORD '${N8N_DB_PASSWORD:-}';
         END IF;
         IF NOT EXISTS (SELECT FROM pg_database WHERE datname='n8n') THEN
-          CREATE DATABASE n8n OWNER ${N8N_DB_USER};
+          CREATE DATABASE n8n OWNER ${N8N_DB_USER:-n8n};
         END IF;
-      END$$;\"
-      "
+      END$$;"
 
   # ======================= REDIS (queue n8n) =======================
   redis-n8n:
     image: redis:7-alpine
     container_name: redis-n8n
-    command: ["redis-server","--requirepass","${REDIS_PASSWORD}"]
+    command: ["redis-server","--requirepass","${REDIS_PASSWORD:-}"]
     healthcheck:
-      test: ["CMD","redis-cli","-a","${REDIS_PASSWORD}","PING"]
+      test: ["CMD","redis-cli","-a","${REDIS_PASSWORD:-}","PING"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -107,35 +105,39 @@ services:
         condition: service_started
     entrypoint: >
       /bin/sh -c "
-        n8n import:credentials --separate --input ${N8N_IMPORT_EXPORT_DIR} || true &&
-        n8n import:workflow    --separate --input ${N8N_IMPORT_EXPORT_DIR} || true &&
+        n8n import:credentials --separate --input ${N8N_IMPORT_EXPORT_DIR:-/backup} || true &&
+        n8n import:workflow    --separate --input ${N8N_IMPORT_EXPORT_DIR:-/backup} || true &&
         n8n start
       "
     environment:
       <<: *common-env
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: db
-      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT:-5432}
       DB_POSTGRESDB_DATABASE: n8n
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      WEBHOOK_URL: ${WEBHOOK_URL}
-      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-${N8N_PUBLIC_URL:-}}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-${N8N_PUBLIC_URL:-}}
       EXECUTIONS_MODE: queue
+      # Redis (queue)
       QUEUE_BULL_REDIS_HOST: redis-n8n
       QUEUE_BULL_REDIS_PORT: 6379
-      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      QUEUE_BULL_REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis-n8n:6379
       QUEUE_BULL_PREFIX: n8n
       OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS:-true}
       QUEUE_HEALTH_CHECK_ACTIVE: ${QUEUE_HEALTH_CHECK_ACTIVE:-true}
-      CONVERTER_API_KEY: ${CONVERTER_API_KEY}
+      # Converter & Ollama
+      CONVERTER_API_KEY: ${CONVERTER_API_KEY:-}
       CONVERTER_URL: http://converter:8000
-      OLLAMA_HOST: ${OLLAMA_HOST}
-      QUEUE_BULL_REDIS_URL=redis://:${REDIS_PASSWORD}@redis-n8n:6379
-      QUEUE_BULL_PREFIX=n8n
-      N8N_IMPORT_EXPORT_DIR=/backup
-      N8N_IMPORT_EXPORT_OVERWRITE=overwrite
+      OLLAMA_HOST_GPU: ${OLLAMA_HOST_GPU:-http://ollama-gpu:11434}
+      OLLAMA_HOST_CPU: ${OLLAMA_HOST_CPU:-http://ollama-cpu:11434}
+      OLLAMA_HOST: ${OLLAMA_HOST:-${OLLAMA_HOST_GPU:-http://ollama-gpu:11434}}
+      # Import/export auto
+      N8N_IMPORT_EXPORT_DIR: ${N8N_IMPORT_EXPORT_DIR:-/backup}
+      N8N_IMPORT_EXPORT_OVERWRITE: ${N8N_IMPORT_EXPORT_OVERWRITE:-overwrite}
     volumes:
       - /srv/n8n_backup:/backup:rw
       - /srv/shared:/data/shared:rw,exec
@@ -160,18 +162,22 @@ services:
       <<: *common-env
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: db
-      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT:-5432}
       DB_POSTGRESDB_DATABASE: n8n
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
       EXECUTIONS_MODE: queue
+      # Redis (queue)
       QUEUE_BULL_REDIS_HOST: redis-n8n
       QUEUE_BULL_REDIS_PORT: 6379
-      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      QUEUE_BULL_REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis-n8n:6379
       QUEUE_BULL_PREFIX: n8n
-      QUEUE_BULL_REDIS_URL=redis://:${REDIS_PASSWORD}@redis-n8n:6379
-      QUEUE_BULL_PREFIX=n8n
+      # Ollama (au cas où tu en as besoin côté worker)
+      OLLAMA_HOST_GPU: ${OLLAMA_HOST_GPU:-http://ollama-gpu:11434}
+      OLLAMA_HOST_CPU: ${OLLAMA_HOST_CPU:-http://ollama-cpu:11434}
+      OLLAMA_HOST: ${OLLAMA_HOST:-${OLLAMA_HOST_GPU:-http://ollama-gpu:11434}}
     command: ["n8n","worker"]
     volumes:
       - /srv/shared:/data/shared:rw,exec
@@ -190,10 +196,10 @@ services:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: db
       DB_POSTGRESDB_DATABASE: n8n
-      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT:-5432}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Paris}
     volumes:
       - /srv/n8n_backup:/backup:rw,exec
@@ -216,8 +222,8 @@ services:
       db:
         condition: service_healthy
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      DB_URI: postgresql://${N8N_DB_USER}:${N8N_DB_PASSWORD}@db:${POSTGRES_PORT}/n8n
+      PGPASSWORD: ${POSTGRES_PASSWORD:-}
+      DB_URI: postgresql://${N8N_DB_USER:-n8n}:${N8N_DB_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/n8n
     volumes:
       - /srv/n8n_backup/pgdump:/backup/pgdump:rw
     entrypoint: >
@@ -266,8 +272,8 @@ services:
     build: ./whisper
     container_name: whisper-transcriber
     volumes:
-      - ${AUDIO_IN}:/app/input:rw
-      - ${AUDIO_OUT}:/app/output:rw
+      - ${AUDIO_IN:-/srv/shared/audio_in}:/app/input:rw
+      - ${AUDIO_OUT:-/srv/shared/audio_out}:/app/output:rw
     restart: unless-stopped
 
   # ======================= Ollama (AMD gpu (rocm)/cpu) =======================
@@ -328,8 +334,8 @@ services:
       KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
       KONG_DNS_ORDER: LAST,A,CNAME
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_ANON_KEY: ${ANON_KEY:-}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:-}
     volumes:
       - /srv/supabase/api/kong.yml:/home/kong/temp.yml:ro
     entrypoint: >
@@ -347,26 +353,26 @@ services:
     environment:
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
-      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL:-${SUPABASE_PUBLIC_URL:-}}
       GOTRUE_DB_DRIVER: postgres
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
-      GOTRUE_SITE_URL: ${SITE_URL}
-      GOTRUE_URI_ALLOW_LIST: ${SITE_URL}
-      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
+      GOTRUE_SITE_URL: ${SITE_URL:-${N8N_PUBLIC_URL:-}}
+      GOTRUE_URI_ALLOW_LIST: ${SITE_URL:-${N8N_PUBLIC_URL:-}}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
-      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
-      GOTRUE_JWT_SECRET: ${JWT_SECRET}
-      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
-      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS}
-      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM}
-      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
-      GOTRUE_SMTP_HOST: ${SMTP_HOST}
-      GOTRUE_SMTP_PORT: ${SMTP_PORT}
-      GOTRUE_SMTP_USER: ${SMTP_USER}
-      GOTRUE_SMTP_PASS: ${SMTP_PASS}
-      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME}
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:-}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP:-true}
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS:-false}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM:-true}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-} 
       GOTRUE_MAILER_URLPATHS_INVITE: ${MAILER_URLPATHS_INVITE}
       GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
       GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
@@ -382,12 +388,12 @@ services:
       analytics:
         condition: service_healthy
     environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
       PGRST_DB_SCHEMAS: public,storage,graphql_public
       PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: ${JWT_SECRET}
-      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
-      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
+      PGRST_JWT_SECRET: ${JWT_SECRET:-}
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET:-}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
       PGRST_DB_USE_LEGACY_GUCS: "false"
     command: ["postgrest"]
     restart: unless-stopped
@@ -403,14 +409,14 @@ services:
     environment:
       PORT: 4000
       DB_HOST: db
-      DB_PORT: ${POSTGRES_PORT}
+      DB_PORT: ${POSTGRES_PORT:-5432}
       DB_USER: supabase_admin
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: ${POSTGRES_DB}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-}
+      DB_NAME: ${POSTGRES_DB:-postgres}
       DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
       DB_ENC_KEY: supabaserealtime
-      API_JWT_SECRET: ${JWT_SECRET}
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      API_JWT_SECRET: ${JWT_SECRET:-}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
@@ -430,11 +436,11 @@ services:
       imgproxy:
         condition: service_started
     environment:
-      ANON_KEY: ${ANON_KEY}
-      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      ANON_KEY: ${ANON_KEY:-}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:-}
       POSTGREST_URL: http://rest:3000
-      PGRST_JWT_SECRET: ${JWT_SECRET}
-      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      PGRST_JWT_SECRET: ${JWT_SECRET:-}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
       FILE_SIZE_LIMIT: 52428800
       STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
@@ -454,9 +460,9 @@ services:
       IMGPROXY_BIND: ":5001"
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
       IMGPROXY_USE_ETAG: "true"
-      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION:-true}
     volumes:
-      - ./supabase/volumes/storage:/var/lib/storage:Z
+      - /srv/supabase/storage:/var/lib/storage:Z
     restart: unless-stopped
 
   meta:
@@ -470,10 +476,10 @@ services:
     environment:
       PG_META_PORT: 8080
       PG_META_DB_HOST: db
-      PG_META_DB_PORT: ${POSTGRES_PORT}
-      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_PORT: ${POSTGRES_PORT:-5432}
+      PG_META_DB_NAME: ${POSTGRES_DB:-postgres}
       PG_META_DB_USER: supabase_admin
-      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD:-}
     restart: unless-stopped
 
   functions:
@@ -483,11 +489,11 @@ services:
       analytics:
         condition: service_healthy
     environment:
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:-}
       SUPABASE_URL: http://kong:8000
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
-      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      SUPABASE_ANON_KEY: ${ANON_KEY:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY:-}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
       VERIFY_JWT: "true"
     volumes:
       - /srv/supabase/functions:/home/deno/functions:Z
@@ -502,14 +508,14 @@ services:
       DB_USERNAME: supabase_admin
       DB_DATABASE: _supabase
       DB_HOSTNAME: db
-      DB_PORT: ${POSTGRES_PORT}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_PORT: ${POSTGRES_PORT:-5432}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-}
       DB_SCHEMA: _analytics
-      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
-      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN:-}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN:-}
       LOGFLARE_SINGLE_TENANT: true
       LOGFLARE_SUPABASE_MODE: true
-      POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/_supabase
+      POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/_supabase
       POSTGRES_BACKEND_SCHEMA: _analytics
       LOGFLARE_FEATURE_FLAG_OVERRIDE: multibackend=true
     restart: unless-stopped
@@ -518,10 +524,10 @@ services:
     image: timberio/vector:0.28.1-alpine
     container_name: supabase-vector
     environment:
-      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN:-}
     volumes:
       - /srv/supabase/logs/vector.yml:/etc/vector/vector.yml:ro,Z
-      - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,Z
+      - ${DOCKER_SOCKET_LOCATION:-/var/run/docker.sock}:/var/run/docker.sock:ro,Z
     command: ["--config","/etc/vector/vector.yml"]
     security_opt:
       - "label=disable"
@@ -537,22 +543,22 @@ services:
         condition: service_healthy
     environment:
       PORT: 4000
-      POSTGRES_PORT: ${POSTGRES_PORT}
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/_supabase
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/_supabase
       CLUSTER_POSTGRES: true
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
-      VAULT_ENC_KEY: ${VAULT_ENC_KEY}
-      API_JWT_SECRET: ${JWT_SECRET}
-      METRICS_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY:-}
+      API_JWT_SECRET: ${JWT_SECRET:-}
+      METRICS_JWT_SECRET: ${JWT_SECRET:-}
       REGION: local
       ERL_AFLAGS: -proto_dist inet_tcp
-      POOLER_TENANT_ID: ${POOLER_TENANT_ID}
-      POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
-      POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
+      POOLER_TENANT_ID: ${POOLER_TENANT_ID:-dev}
+      POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE:-5}
+      POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN:-100}
       POOLER_POOL_MODE: transaction
-      DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE}
+      DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE:-10}
     command: ["/bin/sh","-c","/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"]
     volumes:
       - /srv/supabase/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,Z
@@ -566,15 +572,15 @@ services:
         condition: service_healthy
     environment:
       STUDIO_PG_META_URL: http://meta:8080
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
       DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
       SUPABASE_URL: http://kong:8000
-      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
-      AUTH_JWT_SECRET: ${JWT_SECRET}
-      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-}
+      SUPABASE_ANON_KEY: ${ANON_KEY:-}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:-}
+      AUTH_JWT_SECRET: ${JWT_SECRET:-}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN:-}
       LOGFLARE_URL: http://analytics:4000
       NEXT_PUBLIC_ENABLE_LOGS: true
       NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
