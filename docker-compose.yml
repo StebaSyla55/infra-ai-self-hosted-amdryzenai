@@ -226,15 +226,15 @@ services:
       DB_URI: postgresql://${N8N_DB_USER:-n8n}:${N8N_DB_PASSWORD:-}@db:${POSTGRES_PORT:-5432}/n8n
     volumes:
       - /srv/n8n_backup/pgdump:/backup/pgdump:rw
-    entrypoint: >
-      /bin/sh -lc '
-        mkdir -p /backup/pgdump;
-        while true; do
-          pg_dump --dbname=${DB_URI} --file=/backup/pgdump/n8n-$(date +%F-%H%M).sql;
-          find /backup/pgdump -type f -mtime +14 -delete;
-          sleep 3600;
-        done
-      '
+    entrypoint:  >
+    /bin/sh -lc '
+      mkdir -p /backup/pgdump;
+      while true; do
+        pg_dump --dbname=$$DB_URI --file=/backup/pgdump/n8n-$(date +%F-%H%M).sql;
+        find /backup/pgdump -type f -mtime +14 -delete;
+        sleep 3600;
+      done
+    '
     restart: unless-stopped
 
   # ======================= WAHA =======================
@@ -527,7 +527,7 @@ services:
       LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN:-}
     volumes:
       - /srv/supabase/logs/vector.yml:/etc/vector/vector.yml:ro,Z
-      - ${DOCKER_SOCKET_LOCATION:-/var/run/docker.sock}:/var/run/docker.sock:ro,Z
+      - /var/run/docker.sock:/var/run/docker.sock:ro,Z 
     command: ["--config","/etc/vector/vector.yml"]
     security_opt:
       - "label=disable"
