@@ -272,8 +272,8 @@ services:
     build: ./whisper
     container_name: whisper-transcriber
     volumes:
-      - ${AUDIO_IN:-/srv/shared/audio_in}:/app/input:rw
-      - ${AUDIO_OUT:-/srv/shared/audio_out}:/app/output:rw
+      - "${AUDIO_IN:-/srv/shared/audio_in}:/app/input:rw"
+      - "${AUDIO_OUT:-/srv/shared/audio_out}:/app/output:rw"
     restart: unless-stopped
 
   # ======================= Ollama (AMD gpu (rocm)/cpu) =======================
